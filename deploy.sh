@@ -67,10 +67,21 @@ echo_green "-> Commit các thay đổi..."
 git commit -m "$COMMIT_MESSAGE" || echo "Thông báo: Không có gì mới để commit."
 
 # 7. Đổi tên nhánh thành 'main'
-echo_green "-> Đảm bảo nhánh hiện tại là 'main'..."
+echo_green "-> Đảm bảo nhánh chính là 'main'..."
 git branch -M main
 
-# 8. Đẩy code lên kho chứa từ xa
+# 8. Kiểm tra kết nối SSH đến GitHub
+echo_green "-> Kiểm tra xác thực SSH với GitHub..."
+if ! ssh -T git@github.com 2>&1 | grep -q "Hi ankynguyen163!"; then
+    echo_red "Lỗi: Xác thực SSH không thành công với tài khoản 'ankynguyen163'."
+    echo_red "SSH key hiện tại của bạn có thể đang được liên kết với một tài khoản khác."
+    echo_red "Hãy chạy 'ssh -T git@github.com' để kiểm tra bạn đang đăng nhập với tài khoản nào."
+    echo_red "Vui lòng cấu hình lại SSH key cho tài khoản 'ankynguyen163' và thử lại."
+    exit 1
+fi
+echo_green "-> Xác thực SSH thành công với tài khoản 'ankynguyen163'."
+
+# 9. Đẩy code lên kho chứa từ xa
 echo_green "-> Đẩy các thay đổi lên kho chứa từ xa (origin/main)..."
 git push -u origin main
 
