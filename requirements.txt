@@ -1,0 +1,5 @@
+colorama
+netifaces
+python-nmap
+scapy
+PyYAML
