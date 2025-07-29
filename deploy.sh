@@ -5,7 +5,7 @@
 set -e
 
 # --- Cấu hình ---
-GIT_REPO_URL="https://github.com/ankynguyen163/netscanner.git"
+GIT_REPO_URL="git@github.com:ankynguyen163/netscanner.git"
 COMMIT_MESSAGE="Initial commit of NetScanner project"
 
 # --- Hàm tiện ích màu mè ---
