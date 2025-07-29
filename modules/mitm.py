@@ -108,8 +108,16 @@ class MitmAttacker:
         self.stop_event = threading.Event()
         self.threads = []
         
+        # Initialize missing attributes
+        self.ssl_sessions = {}
+        self.https_data = []
+        
         self.stats = {
             'arp_packets_sent': 0,
+            'packets_intercepted': 0,
+            'ssl_handshakes': 0,
+            'http_requests': 0,
+            'dns_queries': 0,
             'start_time': None,
         }
         self.stats_lock = threading.Lock()
@@ -360,7 +368,7 @@ class MitmAttacker:
                     f"📊 Thống kê MitM: {self.stats['packets_intercepted']} gói tin, "
                     f"{self.stats['arp_packets_sent']} ARP packets, "
                     f"{self.stats['ssl_handshakes']} SSL handshakes, "
-                    f"{self.stats['http_requests']} HTTPS requests, "
+                    f"{self.stats['http_requests']} HTTP requests, "
                     f"{self.stats['dns_queries']} DNS queries"
                 )
                 
@@ -453,6 +461,16 @@ class MitmAttacker:
         """Kiểm tra xem có đang tấn công không."""
         return not self.stop_event.is_set()
 
+    def save_https_data(self, filename: str = None):
+        """Lưu dữ liệu HTTPS đã thu thập."""
+        try:
+            if filename is None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"https_data_{timestamp}.json"
+            
+            data = {
+                'timestamp': datetime.now().isoformat(),
+                'victim_ip': self.victim_ip,
                 'gateway_ip': self.gateway_ip,
                 'ssl_sessions': self.ssl_sessions,
                 'https_data': self.https_data,
@@ -500,7 +518,7 @@ def run_mitm_attack(interface: str, **kwargs):
     try:
         print("\n=== MITM ATTACK MODULE ===")
         # Dummy attacker để truy cập các hàm tiện ích
-        dummy_attacker = MitmAttacker(interface, "", "")
+        dummy_attacker = MitmAttacker(interface, "127.0.0.1", "127.0.0.1")
         
         # 1. Tải danh sách mục tiêu
         all_targets = dummy_attacker.load_targets_from_scan(exclude_router=False, exclude_attacker=True)
