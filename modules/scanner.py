@@ -15,6 +15,8 @@ import subprocess
 import platform
 from datetime import datetime
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 class NetworkScanner:
     """
@@ -25,6 +27,10 @@ class NetworkScanner:
         self.devices = {}
         self.device_db_file = "devices.yaml"  # Chuyển sang YAML
         self.scan_history = []
+        
+        # Lock for thread-safe updates to shared structures
+        self.lock = threading.Lock()
+        self.max_workers = min(32, (os.cpu_count() or 1) * 4)
         
         # Tạo thư mục logs nếu chưa có
         os.makedirs('logs', exist_ok=True)
@@ -100,7 +106,8 @@ class NetworkScanner:
         
         # Quét nhanh để tìm các thiết bị đang hoạt động
         scan_start = time.time()
-        self.nm.scan(hosts=network, arguments='-sn --max-retries 2')
+        # Dùng các tùy chọn nmap tối ưu tốc độ: –n (bỏ DNS), -T4 (tốc độ cao), --min-parallelism tăng song song
+        self.nm.scan(hosts=network, arguments='-n -sn -T4 --max-retries 1 --min-parallelism 64')
         scan_duration = time.time() - scan_start
         
         # Lưu kết quả với thông tin chi tiết
@@ -240,58 +247,100 @@ class NetworkScanner:
     
     def lookup_device_info(self, enhanced_scan=False):
         """Phân tích thêm thông tin về thiết bị"""
-        print("[*] Đang phân tích thông tin thiết bị chi tiết...")
-        
+        print("[*] Đang phân tích thông tin thiết bị chi tiết (đa luồng)...")
+
         active_hosts = [host for host, info in self.devices.items() if info['status'] == 'up']
         total = len(active_hosts)
-        
-        for i, host in enumerate(active_hosts, 1):
-            print(f"[*] Đang quét {host} ({i}/{total})...")
-            try:
-                # Quét cổng và OS
-                scan_args = '-sS -O --host-timeout 30s'
-                if enhanced_scan:
-                    scan_args += ' -sV -sC --script=banner,http-title,ssl-cert'
-                
-                self.nm.scan(hosts=host, arguments=scan_args)
-                
-                # Cập nhật thông tin OS
-                if 'osmatch' in self.nm[host] and len(self.nm[host]['osmatch']) > 0:
-                    os_match = self.nm[host]['osmatch'][0]
-                    self.devices[host]['os'] = os_match['name']
-                    self.devices[host]['os_accuracy'] = os_match['accuracy']
-                    self.devices[host]['os_family'] = os_match.get('osfamily', '')
-                    self.devices[host]['os_version'] = os_match.get('osversion', '')
-                
-                # Quét cổng mở
-                if 'tcp' in self.nm[host]:
-                    self.devices[host]['open_ports'] = list(self.nm[host]['tcp'].keys())
-                    
-                    # Thông tin dịch vụ
-                    for port, service_info in self.nm[host]['tcp'].items():
-                        if service_info['state'] == 'open':
-                            self.devices[host]['services'][port] = {
-                                'name': service_info.get('name', ''),
-                                'product': service_info.get('product', ''),
-                                'version': service_info.get('version', ''),
-                                'extrainfo': service_info.get('extrainfo', '')
-                            }
-                
-                # Phân tích bảo mật
-                self._analyze_security(host)
-                
-                # Đo độ trễ
-                self._measure_latency(host)
-                
-                # In kết quả ngay sau khi quét xong
-                device = self.devices[host]
-                print(f"[+] {host}: {device['mac_vendor']} | {device['os']} | {device['device_type']}")
-                
-                # Lưu ngay vào file
-                self.save_device_db()
-                
-            except Exception as e:
-                print(f"[-] Lỗi khi phân tích thiết bị {host}: {str(e)[:100]}...")
+
+        # Hàm nội bộ để gọi kèm chỉ số tiến trình
+        def _wrap_scan(index_host_tuple):
+            idx, h = index_host_tuple
+            return self._scan_single_host_detail(h, idx, total, enhanced_scan)
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            list(executor.map(_wrap_scan, enumerate(active_hosts, 1)))
+
+        # Sau khi hoàn thành tất cả, lưu cơ sở dữ liệu một lần để giảm I/O
+        self.save_device_db()
+    
+    # === NEW: hàm quét chi tiết 1 host, dùng trong đa luồng ===
+    def _scan_single_host_detail(self, host: str, idx: int, total: int, enhanced_scan: bool = False):
+        """Quét chi tiết 1 host và cập nhật self.devices (thread-safe)"""
+        try:
+            print(f"[*] ({idx}/{total}) Đang quét {host} ...")
+
+            ps = nmap.PortScanner()
+
+            scan_args = '-n -T4 -sS -O --host-timeout 30s'
+            if enhanced_scan:
+                scan_args += ' -sV -sC --script=banner,http-title,ssl-cert'
+
+            ps.scan(hosts=host, arguments=scan_args)
+
+            device = self.devices.get(host, {})
+
+            # Cập nhật thông tin OS
+            if 'osmatch' in ps[host] and len(ps[host]['osmatch']) > 0:
+                os_match = ps[host]['osmatch'][0]
+                device['os'] = os_match['name']
+                device['os_accuracy'] = os_match['accuracy']
+                device['os_family'] = os_match.get('osfamily', '')
+                device['os_version'] = os_match.get('osversion', '')
+
+            # Cổng mở & dịch vụ
+            if 'tcp' in ps[host]:
+                device['open_ports'] = list(ps[host]['tcp'].keys())
+                for port, service_info in ps[host]['tcp'].items():
+                    if service_info['state'] == 'open':
+                        device.setdefault('services', {})[port] = {
+                            'name': service_info.get('name', ''),
+                            'product': service_info.get('product', ''),
+                            'version': service_info.get('version', ''),
+                            'extrainfo': service_info.get('extrainfo', '')
+                        }
+
+            # -------- Phân tích bảo mật đơn giản --------
+            security = device.setdefault('security_info', {
+                'firewall_detected': False,
+                'vulnerabilities': [],
+                'risk_level': 'low'
+            })
+
+            if 'tcp' in ps[host]:
+                filtered_ports = [p for p, inf in ps[host]['tcp'].items() if inf['state'] == 'filtered']
+                if filtered_ports:
+                    security['firewall_detected'] = True
+
+            open_ports = device.get('open_ports', [])
+            risk = []
+            if 22 in open_ports:
+                risk.append('SSH exposed')
+            if 23 in open_ports:
+                risk.append('Telnet exposed (high risk)')
+            if 80 in open_ports:
+                risk.append('HTTP exposed')
+            if 443 in open_ports:
+                risk.append('HTTPS exposed')
+            if 445 in open_ports:
+                risk.append('SMB exposed')
+            security['vulnerabilities'] = risk
+            if any('high risk' in r for r in risk):
+                security['risk_level'] = 'high'
+            elif len(risk) > 3:
+                security['risk_level'] = 'medium'
+            else:
+                security['risk_level'] = 'low'
+
+            # Đo độ trễ
+            self._measure_latency(host)
+
+            with self.lock:
+                self.devices[host] = device
+
+            print(f"[+] {host}: {device.get('mac_vendor', '')} | {device.get('os', '')} | {device.get('device_type', '')}")
+
+        except Exception as e:
+            print(f"[-] Lỗi khi quét {host}: {str(e)[:100]}...")
     
     def _analyze_security(self, host: str):
         """Phân tích thông tin bảo mật"""
@@ -345,7 +394,7 @@ class NetworkScanner:
         """Đo độ trễ đến thiết bị"""
         try:
             import subprocess
-            result = subprocess.run(['ping', '-c', '3', '-W', '1', host], 
+            result = subprocess.run(['ping', '-c', '1', '-W', '1', host], 
                                   capture_output=True, text=True, timeout=10)
             
             if result.returncode == 0:
@@ -369,18 +418,10 @@ class NetworkScanner:
                 with open(self.device_db_file, 'r', encoding='utf-8') as f:
                     data = yaml.safe_load(f)
                     if data:
-                        self.devices = data.get('devices', {})
+                        self.devices = data.get('devices', self.devices)
                         self.scan_history = data.get('scan_history', [])
         except Exception as e:
             print(f"[-] Lỗi khi tải cơ sở dữ liệu thiết bị: {e}")
-            # Fallback to JSON if YAML fails
-            try:
-                json_file = self.device_db_file.replace('.yaml', '.txt')
-                if os.path.exists(json_file):
-                    with open(json_file, 'r') as f:
-                        self.devices = json.load(f)
-            except:
-                pass
     
     def save_device_db(self):
         """Lưu cơ sở dữ liệu thiết bị vào file YAML"""

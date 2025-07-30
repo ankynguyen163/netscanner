@@ -10,6 +10,10 @@ import atexit
 # Import các module chức năng
 from modules.scanner import NetworkScanner
 from modules.ddos import DDoSAttacker
+from modules.ddos import run_ddos_attack as ddos_runner
+from modules.mitm import run_mitm_attack as mitm_runner
+from modules.mitb import run_mitb_attack as mitb_runner
+from modules.sniffer import run_sniffer as sniffer_runner
 from modules.mitm import MitmAttacker
 
 class NetScannerCore:
@@ -51,54 +55,6 @@ class NetScannerCore:
         """Xóa cơ sở dữ liệu thiết bị"""
         scanner = self._create_scanner()
         scanner.reset_device_db()
-    
-    def _create_ddos_attacker(self, targets, port=80, spoof_ip=True):
-        """Tạo module DDoS attacker"""
-        if not self.attacker_ip:
-            # Try to detect network if not already done
-            if not self.detect_network():
-                print("[-] Không thể xác định IP của máy tấn công. Vui lòng quét mạng trước.")
-                return None
-        self.ddos_attacker = DDoSAttacker(targets, self.attacker_ip, self.interface, port=port, spoof_ip=spoof_ip)
-        return self.ddos_attacker
-    
-    def start_lan_ddos(self, port=80, spoof_ip=True):
-        """Bắt đầu tấn công DDoS vào tất cả các thiết bị 'up' trong mạng."""
-        # Đảm bảo có scanner và danh sách thiết bị
-        scanner = self._create_scanner()
-        if not scanner.devices:
-            print("[-] Danh sách thiết bị trống. Vui lòng chạy 'scan' trước.")
-            return False
- 
-        # Lấy tất cả các mục tiêu 'up' từ kết quả quét
-        targets = [ip for ip, info in scanner.devices.items() if info.get('status') == 'up']
-        
-        # Loại trừ gateway (router) khỏi danh sách mục tiêu để tránh làm sập mạng
-        if self.gateway_ip in targets:
-            print(f"[+] Router/Gateway ({self.gateway_ip}) sẽ được loại trừ khỏi cuộc tấn công.")
-            targets.remove(self.gateway_ip)
-
-        if not targets:
-            print("[-] Không tìm thấy mục tiêu nào đang hoạt động để tấn công (sau khi loại trừ router và máy của bạn).")
-            return False
-
-        # Tạo và bắt đầu attacker
-        # Module DDoSAttacker sẽ tự động loại trừ IP của máy tấn công
-        if self._create_ddos_attacker(targets, port=port, spoof_ip=spoof_ip):
-            self.ddos_attacker.start_attack()
-            return True
-        return False
-    
-    def start_mitm(self, target1, target2):
-        """Bắt đầu tấn công MitM giữa hai mục tiêu."""
-        if not self.detect_network():
-            print("[-] Không thể phát hiện mạng. Vui lòng kiểm tra kết nối.")
-            return False
-        
-        # Lớp MitmAttacker sẽ tự quản lý vòng đời của nó
-        self.mitm_attacker = MitmAttacker(target1, target2, self.interface)
-        self.mitm_attacker.start_attack()
-        return True
     
     def detect_network(self):
         """Tự động phát hiện interface và IP của máy tấn công"""
@@ -150,6 +106,39 @@ class NetScannerCore:
             print("[+] Quét mạng hoàn tất.")
         return result
     
+    def run_ddos(self, interface, attacker_ip, **kwargs):
+        """Chạy module DDoS với menu tương tác."""
+        # Đảm bảo có kết quả quét trước
+        if not os.path.exists('devices.yaml') and not os.path.exists('devices.txt'):
+             print(f"[-] Không tìm thấy file kết quả quét (devices.yaml/devices.txt).")
+             print(f"[-] Vui lòng chạy 'scan' trước khi tấn công.")
+             return
+        ddos_runner(attacker_ip=attacker_ip, interface=interface, **kwargs)
+
+    def run_mitm(self, interface, **kwargs):
+        """Chạy module MitM với menu tương tác."""
+        # Đảm bảo có kết quả quét trước
+        if not os.path.exists('devices.yaml') and not os.path.exists('devices.txt'):
+             print(f"[-] Không tìm thấy file kết quả quét (devices.yaml/devices.txt).")
+             print(f"[-] Vui lòng chạy 'scan' trước khi tấn công.")
+             return
+        mitm_runner(interface=interface, **kwargs)
+
+    def run_mitb(self, interface, **kwargs):
+        """Chạy module MitB với menu tương tác."""
+        # Đảm bảo có kết quả quét trước
+        if not os.path.exists('devices.yaml') and not os.path.exists('devices.txt'):
+             print(f"[-] Không tìm thấy file kết quả quét (devices.yaml/devices.txt).")
+             print(f"[-] Vui lòng chạy 'scan' trước khi tấn công.")
+             return
+        # Chạy runner từ module mitb.py
+        mitb_runner(interface=interface, **kwargs)
+
+    def run_sniffer(self, interface, **kwargs):
+        """Chạy module Sniffer."""
+        print("[*] Đang khởi chạy module Sniffer...")
+        sniffer_runner(interface=interface, **kwargs)
+
     def emergency_cleanup(self):
         """Dọn dẹp khi thoát khẩn cấp"""
         print("\n[*] Kích hoạt dọn dẹp khẩn cấp...")

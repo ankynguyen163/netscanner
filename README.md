@@ -43,7 +43,8 @@
 ### 🕵️ **MITM Attack Module** (Giáo dục)
 - **ARP Poisoning**: Chặn và phân tích lưu lượng mạng
 - **Packet Sniffing**: Bắt và phân tích gói tin TCP/UDP
-- **Tấn công đơn/multiple**: 1 target hoặc luân phiên nhiều target
+- **SSL Stripping**: Hạ cấp kết nối HTTPS xuống HTTP (yêu cầu `netfilterqueue`).
+- **SSL Interception**: Giải mã lưu lượng HTTPS (yêu cầu `mitmproxy` và cài đặt CA).
 - **Real-time Analysis**: Phân tích lưu lượng theo thời gian thực
 
 ### 🛠️ **Utilities**
@@ -72,7 +73,7 @@
 ### **Cài Đặt Dependencies**
 ```bash
 # Clone repository
-git clone <your-repo-url>
+git clone https://github.com/your-username/netscanner.git
 cd netscanner
 
 # Tạo virtual environment
@@ -80,6 +81,9 @@ python3 -m venv venv
 source venv/bin/activate  # Linux/macOS
 # hoặc
 venv\Scripts\activate     # Windows
+
+# Lưu ý: Công cụ được tối ưu cho Linux. Một số tính năng (MitM, DDoS)
+# có thể không hoạt động hoặc yêu cầu cấu hình phức tạp trên Windows/macOS.
 
 # Cài đặt dependencies
 pip install -r requirements.txt
@@ -96,7 +100,7 @@ sudo apt install nmap
 ### **Khởi Động**
 ```bash
 # Chạy với quyền root (bắt buộc)
-sudo python3 cli.py
+sudo venv/bin/python3 cli.py
 
 # Hoặc kích hoạt venv trước
 source venv/bin/activate
